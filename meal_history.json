@@ -1,0 +1,47 @@
+[
+  {
+    "date": "2026-04-22 17:42:17",
+    "foods": [],
+    "total_calories": 391,
+    "protein_g": 0,
+    "carbs_g": 0,
+    "fat_g": 0,
+    "image_path": "/tmp/food_image.jpg"
+  },
+  {
+    "date": "2026-04-22 17:53:30",
+    "foods": [],
+    "total_calories": 391,
+    "protein_g": 0,
+    "carbs_g": 0,
+    "fat_g": 0,
+    "image_path": "/tmp/food_image.jpg"
+  },
+  {
+    "date": "2026-04-22 17:55:08",
+    "foods": [],
+    "total_calories": 200,
+    "protein_g": 0,
+    "carbs_g": 0,
+    "fat_g": 0,
+    "image_path": ""
+  },
+  {
+    "date": "2026-04-22 17:55:56",
+    "foods": [],
+    "total_calories": 2672,
+    "protein_g": 0,
+    "carbs_g": 0,
+    "fat_g": 0,
+    "image_path": ""
+  },
+  {
+    "date": "2026-04-22 18:10:04",
+    "foods": [],
+    "total_calories": 1600,
+    "protein_g": 0,
+    "carbs_g": 0,
+    "fat_g": 0,
+    "image_path": "/tmp/food_image.jpg"
+  }
+]

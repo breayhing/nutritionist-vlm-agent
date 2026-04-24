@@ -1,0 +1,14 @@
+{
+  "height_cm": 160,
+  "weight_kg": 60,
+  "age": 22,
+  "gender": "female",
+  "activity_level": "light",
+  "goal": "fat_loss",
+  "allergies": [
+    "坚果"
+  ],
+  "manual_bmr": 1300,
+  "manual_tdee": 1900,
+  "manual_daily_goal": null
+}

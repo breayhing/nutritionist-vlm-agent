@@ -1,0 +1,12 @@
+{
+  "height_cm": 175,
+  "weight_kg": 70,
+  "age": 25,
+  "gender": "male",
+  "activity_level": "moderate",
+  "goal": "maintain",
+  "allergies": [],
+  "manual_bmr": null,
+  "manual_tdee": null,
+  "manual_daily_goal": null
+}

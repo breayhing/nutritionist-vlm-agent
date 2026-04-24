@@ -26,6 +26,7 @@
 """
 
 import os
+import json
 from typing import Annotated, Literal
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
@@ -52,7 +53,7 @@ DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
 # ==============================================
 
 @tool
-def analyze_food_image(image_path: str, analysis_instruction: str = "请分析这张图片中的食物，并以 JSON 格式返回以下信息：\n\n{\n    \"foods\": [\n        {\n            \"name\": \"食物名称\",\n            \"estimated_weight_g\": 估算重量(克),\n            \"calories_per_100g\": 每100克热量(千卡),\n            \"estimated_calories\": 估算热量(千卡)\n        }\n    ],\n    \"total_estimated_calories\": 总热量估算,\n    \"nutrition_tags\": [\"高蛋白\", \"低脂\", \"高纤维\"等标签]\n}\n\n要求：\n1. 尽可能准确地识别所有食材\n2. 基于常见份量估算重量\n3. 使用标准的营养数据库值\n4. 只返回 JSON，不要有其他文字") -> str:
+def analyze_food_image(image_path: str, analysis_instruction: str = "请分析这张图片中的食物，并以 JSON 格式返回以下信息：\n\n{\n    \"foods\": [\n        {\n            \"name\": \"食物名称\",\n            \"estimated_weight_g\": 估算重量(克),\n            \"calories_per_100g\": 每100克热量(千卡),\n            \"estimated_calories\": 估算热量(千卡),\n            \"protein_g\": 蛋白质含量(克),\n            \"carbs_g\": 碳水化合物含量(克),\n            \"fat_g\": 脂肪含量(克)\n        }\n    ],\n    \"total_estimated_calories\": 总热量估算(千卡),\n    \"total_protein_g\": 总蛋白质(克),\n    \"total_carbs_g\": 总碳水(克),\n    \"total_fat_g\": 总脂肪(克),\n    \"nutrition_tags\": [\"高蛋白\", \"低脂\", \"高纤维\"等标签]\n}\n\n要求：\n1. 尽可能准确地识别所有食材\n2. 基于常见份量估算重量\n3. 使用标准的营养数据库值，估算蛋白质、碳水、脂肪含量\n4. 必须返回完整的营养素信息（蛋白质、碳水、脂肪）\n5. 只返回 JSON，不要有其他文字") -> str:
     """
     分析食物图片，识别食材并估算营养信息
     
@@ -125,48 +126,821 @@ def calculate_total_calories(calories_list: str) -> str:
     计算多个食物的总热量
     
     Args:
-        calories_list: 热量列表，格式为 "数字1+数字2+数字3"，例如 "100+200+50"
+        calories_list: 热量列表，可以是以下格式之一：
+                       - 加法表达式: "100+200+50"
+                       - 数字列表: "100,200,50"
+                       - 数字字符串: "350"
     
     Returns:
-        总热量数值
+        总热量数值的字符串
     """
     try:
-        # 清理输入，只保留数字和运算符
         import re
-        cleaned = re.findall(r'[\d\+\-\*\/\.]+', calories_list)[0]
-        result = eval(cleaned)
-        return f"总热量：{result} 千卡"
+        
+        # 清理输入
+        calories_str = str(calories_list).strip()
+        
+        # 如果输入是 JSON 字符串，尝试提取数字
+        if calories_str.startswith('{') or calories_str.startswith('```'):
+            # 尝试提取数字
+            numbers = re.findall(r'\d+', calories_str)
+            if numbers:
+                calories_str = '+'.join(numbers)
+        
+        # 替换中文逗号为英文逗号
+        calories_str = calories_str.replace('，', ',')
+        
+        # 如果是逗号分隔，转成加号
+        if ',' in calories_str and '+' not in calories_str:
+            calories_str = calories_str.replace(',', '+')
+        
+        # 提取数字和运算符
+        cleaned = re.findall(r'[\d+\-\*\/\.]+', calories_str)
+        if cleaned:
+            result = eval(cleaned[0])
+            return f"总热量：{int(result)} 千卡"
+        else:
+            return f"无法解析热量值：{calories_list}"
     except Exception as e:
-        return f"计算错误：{str(e)}"
+        return f"计算错误：{str(e)}，输入为：{calories_list}"
+
+@tool
+def get_nutrition_advice(total_calories: int, food_types: str, username: str = "default_user", user_context: str = "") -> str:
+    """
+    根据总热量、食物类型和用户档案，AI 智能生成营养建议（支持多用户）
+
+    Args:
+        total_calories: 总热量（千卡），可以是数字或字符串
+        food_types: 食物类型列表，用逗号分隔
+        username: 用户名，默认为 "default_user"
+        user_context: 额外的用户上下文信息（可选）
+
+    Returns:
+        AI 生成的个性化营养评价和建议
+    """
+    import re
+    # 处理 total_calories 可能是字符串的情况
+    try:
+        if isinstance(total_calories, str):
+            numbers = re.findall(r'\d+', total_calories)
+            if numbers:
+                total_calories = int(numbers[0])
+            else:
+                total_calories = 0
+        total_calories = int(total_calories)
+    except:
+        total_calories = 0
+
+    # 读取用户档案
+    profile_context = ""
+    safe_username = re.sub(r'[^\w\u4e00-\u9fff]', '_', str(username))
+    profile_file = os.path.join("users", f"user_profile_{safe_username}.json")
+
+    if os.path.exists(profile_file):
+        try:
+            with open(profile_file, "r", encoding="utf-8") as f:
+                profile = json.load(f)
+            goal_text = {"fat_loss": "减脂", "muscle_gain": "增肌", "maintain": "维持"}.get(profile.get("goal", "maintain"), "维持")
+            daily_goal = 0
+            # 计算每日目标
+            weight = profile.get("weight_kg", 70)
+            height = profile.get("height_cm", 175)
+            age = profile.get("age", 25)
+            if profile.get("gender") == "male":
+                bmr = int(88.362 + (13.397 * weight) + (4.799 * height) - (5.677 * age))
+            else:
+                bmr = int(447.593 + (9.247 * weight) + (3.098 * height) - (4.330 * age))
+            multipliers = {"sedentary": 1.2, "light": 1.375, "moderate": 1.55, "active": 1.725, "very_active": 1.9}
+            tdee = int(bmr * multipliers.get(profile.get("activity_level", "moderate"), 1.55))
+            if profile.get("goal") == "fat_loss":
+                daily_goal = int(tdee * 0.8)
+            elif profile.get("goal") == "muscle_gain":
+                daily_goal = int(tdee * 1.1)
+            else:
+                daily_goal = tdee
+
+            profile_context = f"""
+用户：{username}，{profile.get('age', 25)}岁，身高{profile.get('height_cm', 175)}cm，体重{profile.get('weight_kg', 70)}kg
+目标：{goal_text}
+每日建议热量：{daily_goal} 千卡
+过敏原：{', '.join(profile.get('allergies', [])) if profile.get('allergies') else '无'}
+"""
+        except:
+            pass
+
+    # 构建专业的营养师 Prompt
+    nutritionist_prompt = f"""你是一位专业的营养师。请根据以下信息给出营养评价和建议：
+
+{profile_context}
+
+当前摄入：
+- 热量：{total_calories} 千卡
+- 食物类型：{food_types}
+{user_context}
+
+请从以下角度给出专业分析：
+
+1. **热量评估**
+   - 这餐热量占每日建议的比例
+   - 对当前目标（减脂/增肌/维持）的影响
+   - 热量水平评价（偏低/适中/偏高）
+
+2. **营养均衡性**
+   - 食物类型的营养特点
+   - 蛋白质/碳水/脂肪的比例评估
+   - 营养缺口分析
+
+3. **个性化建议**
+   - 根据用户目标给出具体建议
+   - 下一餐如何调整
+   - 是否需要加餐或控制份量
+
+4. **营养素估算（重要！）**
+   - 根据食物类型和热量，估算蛋白质、碳水、脂肪含量
+   - **必须在回复末尾用以下格式列出**：
+     热量：{total_calories}千卡，蛋白质：XX克、碳水：XX克、脂肪：XX克
+
+请用专业但易懂的语言回答，给出具体可操作的建议。
+"""
+
+    try:
+        # 调用 LLM 生成建议
+        llm = ChatOpenAI(
+            model="qwen-max",
+            api_key=DASHSCOPE_API_KEY,
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            temperature=0.7
+        )
+
+        response = llm.invoke(nutritionist_prompt, timeout=60)
+        return response.content
+    except Exception as e:
+        return f"生成建议时出错：{str(e)}"
+
+@tool
+def get_user_profile(username: str = "default_user") -> str:
+    """
+    获取指定用户的个人档案信息（支持多用户）
+
+    Args:
+        username: 用户名，默认为 "default_user"
+
+    Returns:
+        用户的个人信息，包括身高、体重、年龄、性别、活动水平、目标和过敏原
+    """
+    import re
+    # 将用户名转换为安全的文件名
+    safe_username = re.sub(r'[^\w\u4e00-\u9fff]', '_', str(username))
+    user_profile_file = os.path.join("users", f"user_profile_{safe_username}.json")
+    default_profile = {
+        "height_cm": 175,
+        "weight_kg": 70,
+        "age": 25,
+        "gender": "male",
+        "activity_level": "moderate",
+        "goal": "maintain",
+        "allergies": []
+    }
+
+    try:
+        if os.path.exists(user_profile_file):
+            with open(user_profile_file, "r", encoding="utf-8") as f:
+                profile = json.load(f)
+
+            gender_text = "男" if profile["gender"] == "male" else "女"
+            activity_text = {
+                "sedentary": "久坐办公", "light": "轻度活动",
+                "moderate": "中度活动", "active": "经常运动",
+                "very_active": "高强度运动"
+            }.get(profile["activity_level"], profile["activity_level"])
+            goal_text = {
+                "fat_loss": "减脂", "muscle_gain": "增肌", "maintain": "维持体重"
+            }.get(profile["goal"], profile["goal"])
+
+            # 计算 BMR 和 TDEE
+            weight = profile["weight_kg"]
+            height = profile["height_cm"]
+            age = profile["age"]
+            if profile["gender"] == "male":
+                bmr = int(88.362 + (13.397 * weight) + (4.799 * height) - (5.677 * age))
+            else:
+                bmr = int(447.593 + (9.247 * weight) + (3.098 * height) - (4.330 * age))
+
+            multipliers = {
+                "sedentary": 1.2, "light": 1.375, "moderate": 1.55,
+                "active": 1.725, "very_active": 1.9
+            }
+            tdee = int(bmr * multipliers.get(profile["activity_level"], 1.55))
+
+            if profile["goal"] == "fat_loss":
+                daily_goal = int(tdee * 0.8)
+            elif profile["goal"] == "muscle_gain":
+                daily_goal = int(tdee * 1.1)
+            else:
+                daily_goal = tdee
+
+            result = f"""【当前用户档案】
+- 用户名: {username}
+- 基本信息: {gender_text}, {profile['age']}岁, 身高{profile['height_cm']}cm, 体重{profile['weight_kg']}kg
+- 活动水平: {activity_text}
+- 健康目标: {goal_text}
+- 每日建议热量: {daily_goal} 千卡
+- 基础代谢(BMR): {bmr} 千卡
+- 每日消耗(TDEE): {tdee} 千卡
+- 过敏原: {', '.join(profile['allergies']) if profile['allergies'] else '无'}"""
+            return result
+        else:
+            return f"用户 [{username}] 的档案文件不存在，请用户先设置个人信息。"
+    except Exception as e:
+        return f"读取用户档案失败: {str(e)}"
 
 
 @tool
-def get_nutrition_advice(total_calories: int, food_types: str) -> str:
+def update_user_profile(
+    username: str = "default_user",
+    height_cm: int = None,
+    weight_kg: int = None,
+    age: int = None,
+    gender: str = None,
+    activity_level: str = None,
+    goal: str = None,
+    allergies: str = None
+) -> str:
     """
-    根据总热量和食物类型提供营养建议
-    
+    更新指定用户的个人档案信息（支持多用户）
+
     Args:
-        total_calories: 总热量（千卡）
-        food_types: 食物类型列表，用逗号分隔
-    
+        username: 用户名，默认为 "default_user"
+        height_cm: 身高（厘米），不更新则传 None
+        weight_kg: 体重（公斤），不更新则传 None
+        age: 年龄，不更新则传 None
+        gender: 性别（male/female），不更新则传 None
+        activity_level: 活动水平（sedentary/light/moderate/active/very_active），不更新则传 None
+        goal: 目标（fat_loss/muscle_gain/maintain），不更新则传 None
+        allergies: 过敏原（逗号分隔的字符串），不更新则传 None
+
     Returns:
-        营养评价和建议
+        更新结果确认
     """
-    advice = f"基于 {total_calories} 千卡的摄入，包含 {food_types}\n\n"
-    
-    if total_calories < 400:
-        advice += "✅ 低热量餐，适合减脂期\n"
-    elif total_calories < 700:
-        advice += "✅ 适中热量，营养均衡\n"
+    import re
+    # 将用户名转换为安全的文件名
+    safe_username = re.sub(r'[^\w\u4e00-\u9fff]', '_', str(username))
+    os.makedirs("users", exist_ok=True)
+    user_profile_file = os.path.join("users", f"user_profile_{safe_username}.json")
+
+    # 默认档案
+    default_profile = {
+        "height_cm": 175,
+        "weight_kg": 70,
+        "age": 25,
+        "gender": "male",
+        "activity_level": "moderate",
+        "goal": "maintain",
+        "allergies": []
+    }
+
+    # 读取现有档案
+    if os.path.exists(user_profile_file):
+        try:
+            with open(user_profile_file, "r", encoding="utf-8") as f:
+                profile = json.load(f)
+        except:
+            profile = default_profile.copy()
     else:
-        advice += "⚠️ 较高热量，注意控制份量\n"
-    
-    advice += "\n建议：保持多样化饮食，确保蛋白质、碳水、脂肪的合理搭配。"
-    return advice
+        profile = default_profile.copy()
+
+    # 更新指定字段
+    updates = []
+    if height_cm is not None and 100 <= height_cm <= 250:
+        profile["height_cm"] = height_cm
+        updates.append(f"身高更新为 {height_cm}cm")
+    if weight_kg is not None and 30 <= weight_kg <= 200:
+        profile["weight_kg"] = weight_kg
+        updates.append(f"体重更新为 {weight_kg}kg")
+    if age is not None and 15 <= age <= 100:
+        profile["age"] = age
+        updates.append(f"年龄更新为 {age}岁")
+    if gender is not None and gender in ["male", "female"]:
+        profile["gender"] = gender
+        updates.append(f"性别更新为 {'男' if gender == 'male' else '女'}")
+    if activity_level is not None and activity_level in ["sedentary", "light", "moderate", "active", "very_active"]:
+        profile["activity_level"] = activity_level
+        activity_names = {
+            "sedentary": "久坐办公", "light": "轻度活动",
+            "moderate": "中度活动", "active": "经常运动",
+            "very_active": "高强度运动"
+        }
+        updates.append(f"活动水平更新为 {activity_names.get(activity_level, activity_level)}")
+    if goal is not None and goal in ["fat_loss", "muscle_gain", "maintain"]:
+        profile["goal"] = goal
+        goal_names = {"fat_loss": "减脂", "muscle_gain": "增肌", "maintain": "维持"}
+        updates.append(f"目标更新为 {goal_names.get(goal, goal)}")
+    if allergies is not None:
+        profile["allergies"] = [a.strip() for a in allergies.split(",") if a.strip()]
+        updates.append(f"过敏原更新为: {', '.join(profile['allergies']) if profile['allergies'] else '无'}")
+
+    # 保存到文件
+    try:
+        with open(user_profile_file, "w", encoding="utf-8") as f:
+            json.dump(profile, f, ensure_ascii=False, indent=2)
+
+        if updates:
+            return f"✅ 用户 [{username}] 档案已更新:\n" + "\n".join(f"- {u}" for u in updates)
+        else:
+            return f"ℹ️ 用户 [{username}] 没有字段需要更新"
+    except Exception as e:
+        return f"❌ 保存用户档案失败: {str(e)}"
+
+
+@tool
+def meal_decision_advice(
+    current_meal_calories: int,
+    meal_type: str = "lunch",
+    username: str = "default_user",
+    additional_context: str = ""
+) -> str:
+    """
+    根据当前餐热量和用户档案，AI 智能给出剩餐/加餐决策建议（支持多用户）
+
+    Args:
+        current_meal_calories: 当前餐的热量（千卡）
+        meal_type: 当前餐类型（breakfast/lunch/dinner/snack）
+        username: 用户名，默认为 "default_user"
+        additional_context: 额外上下文信息（可选）
+
+    Returns:
+        AI 生成的个性化决策建议
+    """
+    import re
+    # 读取用户档案，计算剩余预算
+    profile_context = ""
+    remaining_calories = 0
+    daily_goal = 0
+
+    safe_username = re.sub(r'[^\w\u4e00-\u9fff]', '_', str(username))
+    profile_file = os.path.join("users", f"user_profile_{safe_username}.json")
+
+    if os.path.exists(profile_file):
+        try:
+            with open(profile_file, "r", encoding="utf-8") as f:
+                profile = json.load(f)
+            goal_text = {"fat_loss": "减脂", "muscle_gain": "增肌", "maintain": "维持"}.get(profile.get("goal", "maintain"), "维持")
+
+            # 计算每日目标
+            weight = profile.get("weight_kg", 70)
+            height = profile.get("height_cm", 175)
+            age = profile.get("age", 25)
+            if profile.get("gender") == "male":
+                bmr = int(88.362 + (13.397 * weight) + (4.799 * height) - (5.677 * age))
+            else:
+                bmr = int(447.593 + (9.247 * weight) + (3.098 * height) - (4.330 * age))
+            multipliers = {"sedentary": 1.2, "light": 1.375, "moderate": 1.55, "active": 1.725, "very_active": 1.9}
+            tdee = int(bmr * multipliers.get(profile.get("activity_level", "moderate"), 1.55))
+            if profile.get("goal") == "fat_loss":
+                daily_goal = int(tdee * 0.8)
+            elif profile.get("goal") == "muscle_gain":
+                daily_goal = int(tdee * 1.1)
+            else:
+                daily_goal = tdee
+
+            # 假设这是当前时间的第一餐，剩余预算 = 每日目标
+            remaining_calories = daily_goal
+
+            profile_context = f"""
+用户：{username}，{profile.get('age', 25)}岁，身高{profile.get('height_cm', 175)}cm，体重{profile.get('weight_kg', 70)}kg
+目标：{goal_text}
+每日建议热量：{daily_goal} 千卡
+当前剩余热量：{remaining_calories} 千卡
+"""
+        except:
+            remaining_calories = 1800
+            daily_goal = 1800
+            profile_context = f"\n用户：{username}\n每日建议热量：{daily_goal} 千卡（默认值）\n当前剩余热量：{remaining_calories} 千卡\n"
+    else:
+        remaining_calories = 1800
+        daily_goal = 1800
+        profile_context = f"\n用户：{username}\n每日建议热量：{daily_goal} 千卡（默认值）\n当前剩余热量：{remaining_calories} 千卡\n"
+
+    meal_names = {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐", "snack": "加餐"}
+    meal_cn = meal_names.get(meal_type, "这餐")
+
+    # 构建专业的营养师 Prompt
+    nutritionist_prompt = f"""你是一位专业的营养师。请根据以下信息给出用餐决策建议：
+
+{profile_context}
+
+当前餐食：
+- 餐型：{meal_cn}
+- 热量：{current_meal_calories} 千卡
+- 占每日剩余比例：{(current_meal_calories / remaining_calories * 100) if remaining_calories > 0 else 0:.1f}%
+{additional_context}
+
+请给出具体的用餐决策建议：
+
+1. **是否吃完**
+   - 根据热量和用户目标判断
+   - 给出明确建议：全部吃完 / 吃到七分饱 / 适当剩余 / 留到下一餐
+
+2. **份量控制**
+   - 建议摄入份量（如 1/2、2/3）
+   - 优先吃哪些部分
+
+3. **后续安排**
+   - 下一餐是否需要调整
+   - 是否需要加餐
+   - 加餐推荐
+
+4. **注意事项**
+   - 根据用户目标的特别提醒
+   - 水分摄入建议
+
+请给出简洁、可操作的决策建议，让用户知道具体怎么做。
+"""
+
+    try:
+        # 调用 LLM 生成建议
+        llm = ChatOpenAI(
+            model="qwen-max",
+            api_key=DASHSCOPE_API_KEY,
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            temperature=0.7
+        )
+
+        response = llm.invoke(nutritionist_prompt, timeout=60)
+        return response.content
+    except Exception as e:
+        return f"生成建议时出错：{str(e)}"
+
+
+@tool
+def list_user_images(username: str = "default_user") -> str:
+    """
+    列出指定用户图库中的所有食物图片（支持多用户）
+
+    Args:
+        username: 用户名，默认为 "default_user"
+
+    Returns:
+        用户图库中图片的列表，包含文件名和路径
+    """
+    import re
+    safe_username = re.sub(r'[^\w\u4e00-\u9fff]', '_', str(username))
+    user_images_dir = os.path.join("users", f"images_{safe_username}")
+
+    if not os.path.exists(user_images_dir):
+        return f"用户 [{username}] 的图库为空，请先上传食物图片。"
+
+    try:
+        images = []
+        for filename in sorted(os.listdir(user_images_dir), reverse=True):
+            if filename.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                file_path = os.path.join(user_images_dir, filename)
+                images.append({
+                    "name": filename,
+                    "path": file_path
+                })
+
+        if not images:
+            return f"用户 [{username}] 的图库为空，请先上传食物图片。"
+
+        # 返回图片列表，最新图片在前
+        result = f"用户 [{username}] 的图库中共有 {len(images)} 张图片：\n\n"
+        for i, img in enumerate(images[:10], 1):  # 最多显示10张
+            result += f"{i}. {img['name']}\n   路径: {img['path']}\n"
+
+        if len(images) > 10:
+            result += f"\n...还有 {len(images) - 10} 张图片\n"
+
+        result += "\n你可以使用 analyze_food_image 工具分析其中任何一张图片。"
+        return result
+    except Exception as e:
+        return f"读取图库失败: {str(e)}"
+
+
+@tool
+def get_food_alternatives(
+    food_name: str,
+    current_cooking_method: str = "普通",
+    username: str = "default_user",
+    user_context: str = ""
+) -> str:
+    """
+    根据用户档案和目标，AI 智能生成食物替代和烹饪方式替代建议（支持多用户）
+
+    使用场景：用户问"可以吃什么代替"、"有什么替代"、"怎么吃更健康"时调用
+
+    Args:
+        food_name: 当前食物或菜品名称（必需）
+        current_cooking_method: 当前烹饪方式（可选，默认"普通"）
+        username: 用户名（可选，默认从上下文获取）
+        user_context: 用户上下文信息（可选）
+
+    Returns:
+        AI 生成的个性化替代建议
+
+    注意：如果 food_name 为空或 None，返回提示用户说明想替代什么食物
+    """
+    import re
+
+    # 检查 food_name 是否有效
+    if not food_name or food_name.strip() == "" or food_name == "未知食物":
+        return "请告诉我您想替代哪种食物，我会为您推荐更健康的选择。"
+
+    # 读取用户档案
+    profile_context = ""
+    safe_username = re.sub(r'[^\w\u4e00-\u9fff]', '_', str(username))
+    profile_file = os.path.join("users", f"user_profile_{safe_username}.json")
+
+    if os.path.exists(profile_file):
+        try:
+            with open(profile_file, "r", encoding="utf-8") as f:
+                profile = json.load(f)
+            goal_text = {"fat_loss": "减脂", "muscle_gain": "增肌", "maintain": "维持"}.get(profile.get("goal", "maintain"), "维持")
+            profile_context = f"""
+用户：{username}，{profile.get('age', 25)}岁，身高{profile.get('height_cm', 175)}cm，体重{profile.get('weight_kg', 70)}kg
+目标：{goal_text}
+过敏原：{', '.join(profile.get('allergies', [])) if profile.get('allergies') else '无'}
+"""
+        except:
+            pass
+
+    # 构建专业的营养师 Prompt
+    nutritionist_prompt = f"""你是一位专业的营养师。请根据以下信息给出食物替代建议：
+
+{profile_context}
+
+当前食物：{food_name}
+烹饪方式：{current_cooking_method if current_cooking_method else '未知'}
+{user_context}
+
+请从以下角度给出建议：
+
+1. **当前食物分析**
+   - 营养特点（蛋白质/碳水/脂肪含量）
+   - 热量水平评估
+   - 是否适合用户当前目标
+
+2. **食物替代建议**
+   - 推荐2-3种更合适的替代食材
+   - 说明替代理由（营养角度）
+   - 考虑用户过敏原
+
+3. **烹饪方式替代建议**
+   - 推荐2-3种更健康的烹饪方式
+   - 说明不同烹饪方式的营养差异
+   - 给出简单可操作的做法
+
+4. **份量建议**
+   - 根据用户目标建议摄入份量
+   - 如何搭配其他食物更均衡
+
+请用专业但易懂的语言回答，格式清晰。
+"""
+
+    try:
+        # 调用 LLM 生成建议
+        llm = ChatOpenAI(
+            model="qwen-max",
+            api_key=DASHSCOPE_API_KEY,
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            temperature=0.7
+        )
+
+        response = llm.invoke(nutritionist_prompt, timeout=60)  # 增加到60秒
+        return response.content
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"❌ get_food_alternatives 错误: {error_detail}")
+        return f"生成替代建议时出错：{str(e)}"
+
+
+@tool
+def record_meal(
+    calories: int,
+    protein_g: float = 0,
+    carbs_g: float = 0,
+    fat_g: float = 0,
+    food_name: str = "未知食物",
+    username: str = "default_user"
+) -> str:
+    """
+    记录用户的饮食到今日日志（支持多用户）
+
+    只有当用户明确表示"这是我吃的"、"刚摄入"、"已经吃了"等肯定意图时才调用此工具。
+    如果用户只是问"分析一下"、"看看多少"、"帮我看看"等，则不要调用此工具。
+
+    Args:
+        calories: 热量（千卡）
+        protein_g: 蛋白质（克）
+        carbs_g: 碳水化合物（克）
+        fat_g: 脂肪（克）
+        food_name: 食物名称描述
+        username: 用户名，默认为 "default_user"
+
+    Returns:
+        记录确认信息
+    """
+    import re
+    safe_username = re.sub(r'[^\w\u4e00-\u9fff]', '_', str(username))
+    meal_history_file = os.path.join("users", f"meal_history_{safe_username}.json")
+
+    # 读取现有记录
+    meal_history = []
+    if os.path.exists(meal_history_file):
+        try:
+            with open(meal_history_file, "r", encoding="utf-8") as f:
+                meal_history = json.load(f)
+        except:
+            pass
+
+    # 添加新记录
+    from datetime import datetime
+    record = {
+        "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "foods": [food_name],
+        "total_calories": calories,
+        "protein_g": protein_g,
+        "carbs_g": carbs_g,
+        "fat_g": fat_g,
+        "image_path": ""
+    }
+    meal_history.append(record)
+
+    # 保存
+    os.makedirs("users", exist_ok=True)
+    try:
+        with open(meal_history_file, "w", encoding="utf-8") as f:
+            json.dump(meal_history, f, ensure_ascii=False, indent=2)
+
+        # 计算今日总计
+        today = datetime.now().strftime("%Y-%m-%d")
+        today_records = [r for r in meal_history if r["date"].startswith(today)]
+        total_calories = sum(r["total_calories"] for r in today_records)
+        total_protein = sum(r["protein_g"] for r in today_records)
+        total_carbs = sum(r["carbs_g"] for r in today_records)
+        total_fat = sum(r["fat_g"] for r in today_records)
+
+        return f"""✅ 已记录到今日饮食：
+- 热量：{calories}千卡
+- 蛋白质：{protein_g}克
+- 碳水：{carbs_g}克
+- 脂肪：{fat_g}克
+
+📊 今日累计：
+- 总热量：{total_calories}千卡
+- 蛋白质：{total_protein:.0f}克
+- 碳水：{total_carbs:.0f}克
+- 脂肪：{total_fat:.0f}克
+- 餐数：{len(today_records)}餐"""
+    except Exception as e:
+        return f"❌ 记录失败: {str(e)}"
+
+
+@tool
+def undo_last_meal_record(username: str = "default_user") -> str:
+    """
+    撤销上一条饮食记录（支持多用户）
+
+    当用户说"取消记录"、"刚才不算"、"删除记录"、"撤回"等时调用此工具。
+
+    Args:
+        username: 用户名，默认为 "default_user"
+
+    Returns:
+        撤销结果
+    """
+    import re
+    safe_username = re.sub(r'[^\w\u4e00-\u9fff]', '_', str(username))
+    meal_history_file = os.path.join("users", f"meal_history_{safe_username}.json")
+
+    if not os.path.exists(meal_history_file):
+        return "⚠️ 没有找到饮食记录"
+
+    try:
+        with open(meal_history_file, "r", encoding="utf-8") as f:
+            meal_history = json.load(f)
+
+        if not meal_history:
+            return "⚠️ 没有可撤销的记录"
+
+        # 删除最后一条
+        removed = meal_history.pop()
+
+        # 保存
+        with open(meal_history_file, "w", encoding="utf-8") as f:
+            json.dump(meal_history, f, ensure_ascii=False, indent=2)
+
+        return f"🗑️ 已撤销上一条记录：{removed['total_calories']}千卡"
+    except Exception as e:
+        return f"❌ 撤销失败: {str(e)}"
+
+
+@tool
+def get_today_meal_records(username: str = "default_user") -> str:
+    """
+    获取今日所有的饮食记录（支持多用户）
+
+    当用户要求查看今日记录、或需要修正记录时调用此工具。
+
+    Args:
+        username: 用户名，默认为 "default_user"
+
+    Returns:
+        今日所有饮食记录的详细信息
+    """
+    import re
+    from datetime import datetime
+    safe_username = re.sub(r'[^\w\u4e00-\u9fff]', '_', str(username))
+    meal_history_file = os.path.join("users", f"meal_history_{safe_username}.json")
+
+    if not os.path.exists(meal_history_file):
+        return "今日还没有饮食记录。"
+
+    try:
+        with open(meal_history_file, "r", encoding="utf-8") as f:
+            meal_history = json.load(f)
+
+        # 筛选今日记录
+        today = datetime.now().strftime("%Y-%m-%d")
+        today_records = [r for r in meal_history if r["date"].startswith(today)]
+
+        if not today_records:
+            return "今日还没有饮食记录。"
+
+        result = f"今日共有 {len(today_records)} 条记录：\n\n"
+        for i, record in enumerate(today_records, 1):
+            foods = ", ".join(record.get("foods", ["未知"]))
+            result += f"{i}. {record['date'].split(' ')[1]} - {foods}\n"
+            result += f"   热量：{record['total_calories']}千卡\n"
+            result += f"   蛋白质：{record['protein_g']}g，碳水：{record['carbs_g']}g，脂肪：{record['fat_g']}g\n\n"
+
+        # 计算总计
+        total_calories = sum(r["total_calories"] for r in today_records)
+        result += f"今日总计：{total_calories}千卡"
+
+        return result
+    except Exception as e:
+        return f"读取记录失败: {str(e)}"
+
+
+@tool
+def clear_today_meals(username: str = "default_user") -> str:
+    """
+    清空今日所有饮食记录（支持多用户）
+
+    当用户明确要求"重新记录"、"清空今日"、"今日记录错了"等时调用此工具。
+
+    Args:
+        username: 用户名，默认为 "default_user"
+
+    Returns:
+        清空结果
+    """
+    import re
+    from datetime import datetime
+    safe_username = re.sub(r'[^\w\u4e00-\u9fff]', '_', str(username))
+    meal_history_file = os.path.join("users", f"meal_history_{safe_username}.json")
+
+    if not os.path.exists(meal_history_file):
+        return "今日还没有饮食记录。"
+
+    try:
+        with open(meal_history_file, "r", encoding="utf-8") as f:
+            meal_history = json.load(f)
+
+        # 筛选出非今日的记录
+        today = datetime.now().strftime("%Y-%m-%d")
+        non_today_records = [r for r in meal_history if not r["date"].startswith(today)]
+
+        # 保存（只保留非今日记录）
+        os.makedirs("users", exist_ok=True)
+        with open(meal_history_file, "w", encoding="utf-8") as f:
+            json.dump(non_today_records, f, ensure_ascii=False, indent=2)
+
+        today_count = len(meal_history) - len(non_today_records)
+        return f"✅ 已清空今日 {today_count} 条记录。今日饮食记录已重置。"
+    except Exception as e:
+        return f"❌ 清空失败: {str(e)}"
+    except Exception as e:
+        return f"❌ 撤销失败: {str(e)}"
 
 
 # 工具列表
-tools = [analyze_food_image, calculate_total_calories, get_nutrition_advice]
+tools = [
+    analyze_food_image,
+    calculate_total_calories,
+    get_nutrition_advice,
+    meal_decision_advice,
+    get_user_profile,
+    update_user_profile,
+    get_food_alternatives,
+    list_user_images,
+    record_meal,
+    undo_last_meal_record,
+    get_today_meal_records,
+    clear_today_meals
+]
 tools_by_name = {t.name: t for t in tools}
 
 # ==============================================
@@ -253,18 +1027,25 @@ def vision_analysis_node(state: AgentState) -> dict:
             "name": "食物名称",
             "estimated_weight_g": 估算重量(克),
             "calories_per_100g": 每100克热量(千卡),
-            "estimated_calories": 估算热量(千卡)
+            "estimated_calories": 估算热量(千卡),
+            "protein_g": 蛋白质含量(克),
+            "carbs_g": 碳水化合物含量(克),
+            "fat_g": 脂肪含量(克)
         }}
     ],
-    "total_estimated_calories": 总热量估算,
+    "total_estimated_calories": 总热量估算(千卡),
+    "total_protein_g": 总蛋白质(克),
+    "total_carbs_g": 总碳水(克),
+    "total_fat_g": 总脂肪(克),
     "nutrition_tags": ["高蛋白", "低脂", "高纤维"等标签]
 }}
 
 要求：
 1. 尽可能准确地识别所有食材
 2. 基于常见份量估算重量
-3. 使用标准的营养数据库值
-4. 只返回 JSON，不要有其他文字
+3. 使用标准的营养数据库值，估算蛋白质、碳水、脂肪含量
+4. 必须返回完整的营养素信息（蛋白质、碳水、脂肪）
+5. 只返回 JSON，不要有其他文字
 
 用户问题：{user_question if user_question else "分析图片中的食物"}
 """
@@ -340,32 +1121,38 @@ def reasoning_node(state: AgentState) -> dict:
     ).bind_tools(tools)
     
     # 构建系统提示
-    system_prompt = """你是专业的营养师助手，具备以下能力：
+    system_prompt = """你是专业的营养师助手。你有以下工具可以帮助用户：
 
-1. **食物分析**：使用 analyze_food_image 工具识别图片中的食物
-2. **热量计算**：使用 calculate_total_calories 工具精确计算总热量
-3. **营养建议**：使用 get_nutrition_advice 工具提供科学的饮食建议
-4. **多轮对话**：记住之前的对话内容
+**可用工具：**
+1. analyze_food_image - 分析食物图片
+2. calculate_total_calories - 计算总热量
+3. get_nutrition_advice - 生成营养建议
+4. meal_decision_advice - 生成用餐决策建议
+5. get_user_profile - 获取用户档案
+6. update_user_profile - 更新用户档案
+7. get_food_alternatives - 推荐食物替代
+8. list_user_images - 列出用户图库中的图片
+9. record_meal - 记录饮食到今日日志
+10. undo_last_meal_record - 撤销上一条记录
+11. get_today_meal_records - 查看今日所有记录
+12. clear_today_meals - 清空今日所有记录
 
-【工作流程】
-- 如果用户提供了图片文件路径（例如 "test.jpg"），调用 analyze_food_image 工具
-  * 你可以根据需要自定义 analysis_instruction 参数，告诉模型如何分析
-  * 默认情况下，模型会返回标准的营养成分 JSON
-  * 示例：
-    - 标准分析：使用默认参数
-    - 只识别食材：analysis_instruction="请列出图片中的所有食材名称"
-    - 重点分析蛋白质：analysis_instruction="请重点分析这顿饭的蛋白质含量和来源"
-    - 减脂评估：analysis_instruction="判断这顿饭是否适合减脂期食用，并说明原因"
-- 如果需要计算总热量，调用 calculate_total_calories 工具
-- 如果需要营养建议，调用 get_nutrition_advice 工具
-- 保持对话自然流畅
+**用户的消息中包含用户档案和今日摄入情况，请注意查看！**
 
-【重要】
-- 只在确实需要时才调用工具
-- 调用工具时提供准确的参数
-- 收到工具结果后，给出友好的回答
-- 当用户提到图片时，询问图片的文件路径
-- 根据用户需求灵活定制分析指令
+**你的工作方式：**
+1. 理解用户的意图和需求
+2. 根据需要调用合适的工具
+3. 综合工具结果，给出专业、友好的回复
+
+**关于记录饮食：**
+- 只有当用户明确表示这餐是他们吃的时候，才调用 record_meal
+- 如果用户只是询问、分析，不要记录
+- 如果用户说记错了、要重新记录，调用 clear_today_meals 清空后重新记录
+
+**回复格式：**
+- 自然、专业、友好
+- 分析食物时列出营养素：热量、蛋白质、碳水、脂肪
+- 不要解释工具调用过程
 """
     
     # 构建消息列表（系统提示 + 对话历史）
